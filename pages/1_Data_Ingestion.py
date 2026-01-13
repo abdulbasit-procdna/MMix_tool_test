@@ -1040,16 +1040,24 @@ if uploaded_files:
 
                 # Build validity: pattern first (10 digits starting 1/2)
                 if npi_col and npi_col != "-- none --":
-                    s = pl.col(npi_col).cast(pl.Utf8).str.strip_chars().str.replace_all(r"\.0$", "")
-                    pattern_ok = s.str.contains(r"^[12]\d{9}$", literal=False)
+                    tmp = tmp.with_columns(
+                        pl.col(npi_col)
+                        .cast(pl.Utf8)
+                        .str.strip_chars()
+                        .str.replace_all(r"\.0$", "")
+                        .alias("_npi")
+                    )
+                    
+                    pattern_ok = pl.col("_npi").str.contains(r"^[12]\d{9}$")
+
                     if use_luhn:
-                        # Unique-first cache for speed
                         unique_npIs = (
-                            tmp.select(s.alias("_npi"))
-                            .filter(pattern_ok)
-                            .select(pl.col("_npi").drop_nulls().unique())
-                            .to_series().to_list()
-                        )
+                                tmp
+                                .filter(pattern_ok)
+                                .select(pl.col("_npi").drop_nulls().unique())
+                                .to_series()
+                                .to_list()
+                            )
                         cache = {n: luhn_valid_npi(n) for n in unique_npIs}
                         luhn_ok = s.map_elements(lambda x: cache.get(x, False), return_dtype=pl.Boolean)
                         npi_valid = pattern_ok & luhn_ok
@@ -1432,4 +1440,5 @@ if uploaded_files:
                         )
             else:
                 st.warning("⚠️ Please load granularity before selecting granularity level.")
+
 
