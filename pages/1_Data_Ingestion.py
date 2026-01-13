@@ -50,7 +50,7 @@ def detect_date_columns_by_sampling(
         best_max = None
         for fmt in formats:
             parsed = samp.select(
-                pl.col(col).str.strptime(pl.Date, format=fmt, strict=False, exact=True).alias("_p")
+                pl.col(col).str.strptime(pl.Date, format=fmt, strict=False, exact=False).alias("_p")
             ).get_column("_p")
             if len(parsed) == 0:
                 continue
@@ -106,7 +106,8 @@ def normalize_columns_pl(df: pl.DataFrame, columns: List[str], method: str = "zs
     out = df.clone()
 
     # Ensure selected columns exist and are numeric-like
-    cols = [c for c in columns if c in out.columns]
+    cols = [c for c in columns if c in out.columns and out.schema[c].is_numeric()]
+
 
     if method == "zscore":
         # Compute means and stds as Python scalars
@@ -152,9 +153,10 @@ def last_working_day(year: int, month: int, work_days: int) -> date:
     Returns a date (not datetime).
     """
     if month == 12:
-        month = 0
-        year += 1
-    last_day_dt = datetime(year, month + 1, 1) - timedelta(days=1)
+        last_day_dt = datetime(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last_day_dt = datetime(year, month + 1, 1) - timedelta(days=1)
+
     if work_days == 5:
         while last_day_dt.weekday() > 4:  # Fri is 4; Sat=5, Sun=6
             last_day_dt -= timedelta(days=1)
@@ -210,18 +212,23 @@ def last_week_apportion_polars(
 
     # day_diff = (LWD - week_start_date) + 1
     df = df.with_columns(
-        ((pl.col("_last_working_date") - pl.col(date_col_name)).dt.days() + 1).alias("_day_diff")
+        pl.max_horizontal(
+            pl.lit(0),
+            (pl.col("_last_working_date") - pl.col(date_col_name)).dt.days() + 1
+        ).alias("_day_diff")
     )
+
 
     # Compute adjusted KPI columns
     adjusted_cols = [f"adjusted_{k}" for k in kpi_col_list]
     adjust_exprs = [
         pl.when(pl.col("_day_diff") < work_days)
-          .then(((work_days - pl.col("_day_diff")) / work_days) * pl.col(k))
-          .otherwise(pl.lit(0.0))
-          .alias(f"adjusted_{k}")
+        .then(((work_days - pl.col("_day_diff")) / work_days) * pl.col(k))
+        .otherwise(pl.lit(0).cast(pl.col(k).dtype))
+        .alias(f"adjusted_{k}")
         for k in kpi_col_list
     ]
+
     if adjust_exprs:
         df = df.with_columns(adjust_exprs)
 
@@ -240,6 +247,7 @@ def last_week_apportion_polars(
         new_rows = df.filter(pl.col("_max_adjusted") > 0)
     else:
         new_rows = df.head(0)
+
 
     # Next month-begin date
     next_month_begin_expr = pl.when(pl.col(date_col_name).dt.month() == 12).then(
@@ -266,8 +274,8 @@ def last_week_apportion_polars(
     # Align columns and concatenate
     # Ensure both frames share the same schema columns
     all_cols = list({*base_clean.columns, *new_rows_clean.columns})
-    base_aligned = base_clean.select([pl.col(c) if c in base_clean.columns else pl.lit(None).alias(c) for c in all_cols])
-    new_aligned  = new_rows_clean.select([pl.col(c) if c in new_rows_clean.columns else pl.lit(None).alias(c) for c in all_cols])
+    base_aligned = base_clean.select([pl.col(c) if c in base_clean.columns else pl.lit(None).cast(base_clean.schema[c]).alias(c) for c in all_cols])
+    new_aligned  = new_rows_clean.select([pl.col(c) if c in new_rows_clean.columns else pl.lit(None).cast(base_clean.schema[c]).alias(c) for c in all_cols])
 
     out = pl.concat([base_aligned, new_aligned], how="vertical", rechunk=True)
     return out
@@ -276,6 +284,8 @@ def last_week_apportion_polars(
 import polars as pl
 import streamlit as st
 from typing import Dict, List
+import pandas as pd
+
 def detect_date_granularity(df, date_column: str):
     # Accept pandas or Polars; normalize to Polars
     if isinstance(df, pd.DataFrame):
@@ -626,7 +636,7 @@ st.markdown("""
 if st.button("Reset workflow", key="btn_reset_workflow"):
         reset_full_workflow()
         st.success("Workflow has been reset. Re-upload files to continue.")
-        st.stop()
+    
 
 
 # --- FILE UPLOAD ---
@@ -724,7 +734,7 @@ if uploaded_files:
             date_cols = st.multiselect(
                 "Select Date Columns (if any):",
                 df.columns,
-                dafault=suggested_dates,
+                default=suggested_dates,
                 key="date_cols_single"
             )
             if suggested_dates:
@@ -737,6 +747,8 @@ if uploaded_files:
                     index=None,
                     key=f"date_format_single_{date_col}"
                 )
+                st.session_state[f"date_output_format_{date_col}"] = date_format
+
 
                 if date_format == "Custom":
                     date_format = st.text_input(
@@ -749,7 +761,7 @@ if uploaded_files:
                         df = df.with_columns(
                             pl.col(date_col).cast(pl.Utf8).str.strptime(pl.Date, format=date_format, strict=False).alias(date_col)
                         )
-                        st.success(f"✅ Date column `{date_col}` standardized from `{date_format}` to `YYYY/MM/DD` (Date dtype)!")
+                        st.success(f"✅ Date column `{date_col}` standardized from `{date_format}` to (Date dtype)!")
                     except Exception as e:
                         st.error(f"❌ Failed to parse date column `{date_col}`: {e}")
 
@@ -976,10 +988,12 @@ if uploaded_files:
 
             # Create display DataFrame with dates formatted as strings
             df_display = df_final.clone()
+            
             for col, dtype in zip(df_display.columns, df_display.dtypes):
                 if dtype in (pl.Date, pl.Datetime):
+                    fmt = st.session_state.get(f"date_output_format_{col}", "%Y-%m-%d")
                     df_display = df_display.with_columns(
-                        pl.col(col).dt.strftime("%Y-%m-%d").alias(col)
+                        pl.col(col).dt.strftime(fmt).alias(col)
                     )
 
             st.dataframe(df_display.head(100).to_pandas())
@@ -1026,7 +1040,7 @@ if uploaded_files:
 
                 # Build validity: pattern first (10 digits starting 1/2)
                 if npi_col and npi_col != "-- none --":
-                    s = pl.col(npi_col).cast(pl.Utf8).str.strip_chars()
+                    s = pl.col(npi_col).cast(pl.Utf8).str.strip_chars().str.replace_all(r"\.0$", "")
                     pattern_ok = s.str.contains(r"^[12]\d{9}$", literal=False)
                     if use_luhn:
                         # Unique-first cache for speed
@@ -1209,8 +1223,9 @@ if uploaded_files:
 
                 for col, dtype in zip(df_filtered_display.columns, df_filtered_display.dtypes):
                     if dtype in (pl.Date, pl.Datetime):
+                        fmt = st.session_state.get(f"date_output_format_{col}", "%Y-%m-%d")
                         df_filtered_display = df_filtered_display.with_columns(
-                            pl.col(col).dt.strftime("%Y-%m-%d").alias(col)
+                            pl.col(col).dt.strftime(fmt).alias(col)
                         )
 
                 st.dataframe(df_filtered_display.head(100).to_pandas())
@@ -1417,3 +1432,4 @@ if uploaded_files:
                         )
             else:
                 st.warning("⚠️ Please load granularity before selecting granularity level.")
+
