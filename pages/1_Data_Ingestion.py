@@ -1059,7 +1059,11 @@ if uploaded_files:
                                 .to_list()
                             )
                         cache = {n: luhn_valid_npi(n) for n in unique_npIs}
-                        luhn_ok = s.map_elements(lambda x: cache.get(x, False), return_dtype=pl.Boolean)
+                        luhn_ok = pl.col("_npi").map_elements(
+                                lambda x: cache.get(x, False),
+                                return_dtype=pl.Boolean
+                            )
+
                         npi_valid = pattern_ok & luhn_ok
                     else:
                         npi_valid = pattern_ok
@@ -1440,5 +1444,6 @@ if uploaded_files:
                         )
             else:
                 st.warning("⚠️ Please load granularity before selecting granularity level.")
+
 
 
