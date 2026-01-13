@@ -636,7 +636,7 @@ with tab_pca:
         )
         st.plotly_chart(fig_cum, use_container_width=True)
 
-        st.session_state["df_pca_multicollinearity"] = df_pca
+        st.session_state["joined_output_df"] = df_pca
 
         st.markdown("**Sample of PCA-transformed dataset (top 20 rows):**")
         st.dataframe(df_pca.head(20))
@@ -653,4 +653,4 @@ with tab_pca:
         for pc, table in top3.items():
             st.markdown(f"### {pc}")
             st.dataframe(table)
-
+ 
